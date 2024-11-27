@@ -1,4 +1,4 @@
-module github.com/iamacarpet/go-win64api
+module github.com/bartlomiej98/go-win64api
 
 go 1.13
 

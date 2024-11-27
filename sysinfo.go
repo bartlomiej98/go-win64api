@@ -18,6 +18,87 @@ import (
 	so "github.com/iamacarpet/go-win64api/shared"
 )
 
+func isWindows7() bool {
+    comshim.Add(1)
+    defer comshim.Done()
+
+    unknown, err := oleutil.CreateObject("WbemScripting.SWbemLocator")
+    if err != nil {
+        fmt.Printf("Unable to create initial object, %s\n", err.Error())
+        return false
+    }
+    defer unknown.Release()
+
+    wmi, err := unknown.QueryInterface(ole.IID_IDispatch)
+    if err != nil {
+        fmt.Printf("Unable to create query interface, %s\n", err.Error())
+        return false
+    }
+    defer wmi.Release()
+
+    serviceRaw, err := oleutil.CallMethod(wmi, "ConnectServer")
+    if err != nil {
+        fmt.Printf("Error Connecting to WMI Service, %s\n", err.Error())
+        return false
+    }
+    service := serviceRaw.ToIDispatch()
+    defer service.Release()
+
+    // Wykonaj zapytanie WMI, aby pobrać wersję systemu operacyjnego
+    resultRaw, err := oleutil.CallMethod(service, "ExecQuery", "SELECT Version FROM Win32_OperatingSystem")
+    if err != nil {
+        fmt.Printf("Unable to execute query while getting Operating System info. %s\n", err.Error())
+        return false
+    }
+    result := resultRaw.ToIDispatch()
+    defer result.Release()
+
+    countVar, err := oleutil.GetProperty(result, "Count")
+    if err != nil {
+        fmt.Printf("Unable to get property Count while processing Operating System info. %s\n", err.Error())
+        return false
+    }
+    count := int(countVar.Val)
+
+    if count > 0 {
+        itemRaw, err := oleutil.CallMethod(result, "ItemIndex", 0)
+        if err != nil {
+            fmt.Printf("Failed to fetch result row while processing Operating System info. %s\n", err.Error())
+            return false
+        }
+        item := itemRaw.ToIDispatch()
+        defer item.Release()
+
+        resVersion, err := oleutil.GetProperty(item, "Version")
+        if err != nil {
+            fmt.Printf("Error while getting property Version from Operating System info. %s\n", err.Error())
+            return false
+        }
+        versionStr := resVersion.ToString()
+
+        // Parsuj wersję systemu operacyjnego
+        versionParts := strings.Split(versionStr, ".")
+        if len(versionParts) < 2 {
+            fmt.Printf("Invalid OS version format: %s\n", versionStr)
+            return false
+        }
+        major, err := strconv.Atoi(versionParts[0])
+        if err != nil {
+            fmt.Printf("Error parsing major version: %s\n", err.Error())
+            return false
+        }
+        minor, err := strconv.Atoi(versionParts[1])
+        if err != nil {
+            fmt.Printf("Error parsing minor version: %s\n", err.Error())
+            return false
+        }
+        return major == 6 && minor == 1
+    } else {
+        fmt.Printf("No Operating System info found\n")
+        return false
+    }
+}
+
 func GetSystemProfile() (so.Hardware, so.OperatingSystem, so.Memory, []so.Disk, []so.Network, error) {
 	comshim.Add(1)
 	defer comshim.Done()
@@ -127,68 +208,79 @@ func GetSystemProfile() (so.Hardware, so.OperatingSystem, so.Memory, []so.Disk, 
 
 	// Query 2 - Computer System information.
 	err = func() error {
-		resultRaw, err := oleutil.CallMethod(service, "ExecQuery", "SELECT AutomaticManagedPagefile, Manufacturer, Model, TotalPhysicalMemory, SystemFamily FROM Win32_ComputerSystem")
-		if err != nil {
-			return fmt.Errorf("Unable to execute query while getting Computer System info. %s", err.Error())
-		}
-		result := resultRaw.ToIDispatch()
-		defer result.Release()
-
-		countVar, err := oleutil.GetProperty(result, "Count")
-		if err != nil {
-			return fmt.Errorf("Unable to get property Count while processing Computer System info. %s", err.Error())
-		}
-		count := int(countVar.Val)
-
-		if count > 0 {
-			itemRaw, err := oleutil.CallMethod(result, "ItemIndex", 0)
-			if err != nil {
-				return fmt.Errorf("Failed to fetch result row while processing Computer System info. %s", err.Error())
-			}
-			item := itemRaw.ToIDispatch()
-			defer item.Release()
-
-			resMPF, err := oleutil.GetProperty(item, "AutomaticManagedPagefile")
-			if err != nil {
-				return fmt.Errorf("Error while getting property AutomaticManagedPagefile in Computer System info. %s", err.Error())
-			}
-			if resMPF.Value() != nil {
-				if resVMPF, ok := resMPF.Value().(bool); ok {
-					retMEM.SystemManagedPageFile = resVMPF
-				} else {
-					return fmt.Errorf("Error asserting AutomaticManagedPagefile to bool. Got type %s", reflect.TypeOf(resMPF.Value()).Name())
-				}
-			}
-			resManufacturer, err := oleutil.GetProperty(item, "Manufacturer")
-			if err != nil {
-				return fmt.Errorf("Error while getting property Manufacturer in Computer System info. %s", err.Error())
-			}
-			retHW.Manufacturer = resManufacturer.ToString()
-			resModel, err := oleutil.GetProperty(item, "Model")
-			if err != nil {
-				return fmt.Errorf("Error while getting property Model in Computer System info. %s", err.Error())
-			}
-			retHW.Model = resModel.ToString()
-			resSystemFamily, err := oleutil.GetProperty(item, "SystemFamily")
-			if err != nil {
-				return fmt.Errorf("Error while getting property SystemFamily in Computer System info. %s", err.Error())
-			}
-			retHW.SystemFamily = resSystemFamily.ToString()
-			resTM, err := oleutil.GetProperty(item, "TotalPhysicalMemory")
-			if err != nil {
-				return fmt.Errorf("Error while getting property TotalPhysicalMemory in Computer System info. %s", err.Error())
-			}
-			if resTM.Value() != nil {
-				if resVTM, ok := resTM.Value().(string); ok {
-					if retMEM.TotalRAM, err = strconv.ParseUint(resVTM, 10, 64); err != nil {
-						return fmt.Errorf("Error while converting TotalPhysicalMemory to integer. %s", err.Error())
-					}
-				} else {
-					return fmt.Errorf("Error asserting TotalPhysicalMemory to string. Got type %s", reflect.TypeOf(resTM.Value()).Name())
-				}
-			}
-		}
-		return nil
+	    var query string
+	    if isWindows7() {
+	        query = "SELECT AutomaticManagedPagefile, Manufacturer, Model, TotalPhysicalMemory FROM Win32_ComputerSystem"
+	    } else {
+	        query = "SELECT AutomaticManagedPagefile, Manufacturer, Model, TotalPhysicalMemory, SystemFamily FROM Win32_ComputerSystem"
+	    }
+	
+	    resultRaw, err := oleutil.CallMethod(service, "ExecQuery", query)
+	    if err != nil {
+	        return fmt.Errorf("Unable to execute query while getting Computer System info. %s", err.Error())
+	    }
+	    result := resultRaw.ToIDispatch()
+	    defer result.Release()
+	
+	    countVar, err := oleutil.GetProperty(result, "Count")
+	    if err != nil {
+	        return fmt.Errorf("Unable to get property Count while processing Computer System info. %s", err.Error())
+	    }
+	    count := int(countVar.Val)
+	
+	    if count > 0 {
+	        itemRaw, err := oleutil.CallMethod(result, "ItemIndex", 0)
+	        if err != nil {
+	            return fmt.Errorf("Failed to fetch result row while processing Computer System info. %s", err.Error())
+	        }
+	        item := itemRaw.ToIDispatch()
+	        defer item.Release()
+	
+	        resMPF, err := oleutil.GetProperty(item, "AutomaticManagedPagefile")
+	        if err != nil {
+	            return fmt.Errorf("Error while getting property AutomaticManagedPagefile in Computer System info. %s", err.Error())
+	        }
+	        if resMPF.Value() != nil {
+	            if resVMPF, ok := resMPF.Value().(bool); ok {
+	                retMEM.SystemManagedPageFile = resVMPF
+	            } else {
+	                return fmt.Errorf("Error asserting AutomaticManagedPagefile to bool. Got type %s", reflect.TypeOf(resMPF.Value()).Name())
+	            }
+	        }
+	        resManufacturer, err := oleutil.GetProperty(item, "Manufacturer")
+	        if err != nil {
+	            return fmt.Errorf("Error while getting property Manufacturer in Computer System info. %s", err.Error())
+	        }
+	        retHW.Manufacturer = resManufacturer.ToString()
+	        resModel, err := oleutil.GetProperty(item, "Model")
+	        if err != nil {
+	            return fmt.Errorf("Error while getting property Model in Computer System info. %s", err.Error())
+	        }
+	        retHW.Model = resModel.ToString()
+	        if !isWindows7() {
+	            resSystemFamily, err := oleutil.GetProperty(item, "SystemFamily")
+	            if err != nil {
+	                return fmt.Errorf("Error while getting property SystemFamily in Computer System info. %s", err.Error())
+	            }
+	            retHW.SystemFamily = resSystemFamily.ToString()
+	        } else {
+	            retHW.SystemFamily = "Unknown"
+	        }
+	        resTM, err := oleutil.GetProperty(item, "TotalPhysicalMemory")
+	        if err != nil {
+	            return fmt.Errorf("Error while getting property TotalPhysicalMemory in Computer System info. %s", err.Error())
+	        }
+	        if resTM.Value() != nil {
+	            if resVTM, ok := resTM.Value().(string); ok {
+	                if retMEM.TotalRAM, err = strconv.ParseUint(resVTM, 10, 64); err != nil {
+	                    return fmt.Errorf("Error while converting TotalPhysicalMemory to integer. %s", err.Error())
+	                }
+	            } else {
+	                return fmt.Errorf("Error asserting TotalPhysicalMemory to string. Got type %s", reflect.TypeOf(resTM.Value()).Name())
+	            }
+	        }
+	    }
+	    return nil
 	}()
 	if err != nil {
 		return retHW, retOS, retMEM, retDISK, retNET, err
